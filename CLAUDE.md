@@ -218,6 +218,182 @@ const optimized = await aggregator.optimizeContext({
 });
 ```
 
+## Loading Strategies
+
+### Focused Loading Strategy
+
+The **Focused Loading Strategy** is optimized for cloud/hosted environments where token limits and API costs are critical concerns. Unlike progressive loading (which loads incrementally) or breadth-first (which scans broadly), focused loading uses intelligent relevance scoring to load only the most pertinent context.
+
+#### When to Use Focused Loading
+
+**Cloud/Hosted Environments**:
+- Working with Claude API (token limits: 200K input, cost per token)
+- GitHub Copilot integration (context window constraints)
+- CI/CD pipelines (minimize processing time and costs)
+- Serverless functions (execution time limits)
+
+**Use Cases**:
+- Specific bug fix or feature implementation
+- Code review with targeted scope
+- Security audit of specific modules
+- Performance optimization of particular code paths
+
+**NOT Recommended For**:
+- Full codebase exploration (use breadth-first)
+- Learning new codebase structure (use progressive)
+- Comprehensive refactoring (use progressive with chunking)
+
+#### How Focused Loading Works
+
+```typescript
+const context = await aggregator.loadContext({
+  query: 'authentication middleware JWT validation',
+  strategy: 'focused',
+  maxTokens: 8000,
+  relevanceThreshold: 0.8, // Higher threshold = more focused
+  options: {
+    includeTests: false,    // Exclude tests for production code review
+    includeDocs: true,      // Include relevant documentation
+    maxDepth: 3            // Limit dependency traversal depth
+  }
+});
+```
+
+**Algorithm**:
+1. **Parse Query**: Extract keywords and intent from query string
+2. **Initial Scoring**: Score all files based on:
+   - Filename/path relevance to query keywords
+   - File type (prioritize source over tests/docs)
+   - Recent modification (prioritize recently changed files)
+   - Import/dependency relationships
+3. **Top-N Selection**: Select top N files above relevance threshold
+4. **Dependency Analysis**: Load direct dependencies of selected files (bounded by maxDepth)
+5. **Token Budget**: Fill remaining token budget with next-highest scored files
+6. **Optimization**: Apply content optimization if over budget
+
+#### Relevance Scoring Details
+
+Scores are calculated using weighted factors:
+
+```typescript
+interface IRelevanceFactors {
+  keywordMatch: number;      // 40% weight - matches in filename/path
+  contentMatch: number;      // 30% weight - matches in file content
+  importanceScore: number;   // 20% weight - centrality in dep graph
+  recencyScore: number;      // 10% weight - modification timestamp
+}
+
+// Final score: 0.0 (irrelevant) to 1.0 (highly relevant)
+```
+
+**Example Scores**:
+- `src/auth/middleware/jwt-validator.ts` for query "JWT validation" → 0.95
+- `src/auth/types.ts` (imported by jwt-validator) → 0.75
+- `tests/auth/jwt.test.ts` → 0.60 (lower due to file type)
+- `src/database/users.ts` → 0.35 (tangentially related)
+- `src/ui/components/Button.tsx` → 0.05 (irrelevant)
+
+#### Cloud Environment Optimization
+
+**Token Budget Management**:
+```typescript
+const context = await aggregator.loadContext({
+  query: 'fix authentication bug in JWT refresh',
+  strategy: 'focused',
+  maxTokens: 8000,           // Claude API: leave room for response
+  strictMode: true,          // Throw error if budget exceeded
+  options: {
+    optimizationTechnique: 'aggressive', // More aggressive minification
+    stripComments: true,                 // Remove comments
+    stripWhitespace: true,               // Normalize whitespace
+    collapseImports: true                // Consolidate import statements
+  }
+});
+```
+
+**Cost Optimization**:
+- **Cache Aggressively**: Cache relevance scores and analysis (TTL: 1 hour)
+- **Incremental Loading**: Load additional context only if needed
+- **Batch Operations**: Group multiple queries to amortize analysis costs
+
+```typescript
+const aggregator = await createContextAggregator({
+  projectRoot: '.',
+  cache: {
+    type: 'hybrid',           // In-memory + disk cache
+    ttl: 3600000,            // 1 hour TTL
+    persistToDisk: true      // Survive restarts
+  }
+});
+```
+
+**Performance Benchmarks** (1000-file TypeScript project):
+- Progressive loading: ~2.5s, 45K tokens
+- Breadth-first loading: ~3.2s, 78K tokens
+- Focused loading: ~0.8s, 12K tokens (with query)
+
+#### Best Practices for Cloud/Hosted Usage
+
+1. **Start Focused, Expand if Needed**:
+```typescript
+// Initial focused load
+let context = await aggregator.loadContext({
+  query: initialQuery,
+  strategy: 'focused',
+  maxTokens: 8000
+});
+
+// If insufficient, expand with progressive
+if (context.confidence < 0.7) {
+  context = await aggregator.loadContext({
+    query: initialQuery,
+    strategy: 'progressive',
+    maxTokens: 20000,
+    seedFiles: context.files // Start from focused results
+  });
+}
+```
+
+2. **Use Relevance Threshold Wisely**:
+   - High threshold (0.8-1.0): Very specific queries, known codebase
+   - Medium threshold (0.6-0.8): General feature work
+   - Low threshold (0.4-0.6): Exploratory work (better to use progressive)
+
+3. **Monitor Token Usage**:
+```typescript
+const context = await aggregator.loadContext({
+  query: 'implement user settings',
+  strategy: 'focused',
+  maxTokens: 8000,
+  onProgress: (progress) => {
+    console.log(`Loaded ${progress.tokensUsed}/${progress.maxTokens} tokens`);
+    console.log(`Files: ${progress.filesLoaded}/${progress.filesScored}`);
+  }
+});
+```
+
+4. **Combine with Chunking for Large Codebases**:
+```typescript
+const chunks = await aggregator.chunkContext({
+  query: 'API refactoring',
+  strategy: 'focused',
+  chunkSize: 6000,        // Leave room for system prompts
+  overlapTokens: 500      // Context continuity between chunks
+});
+
+// Process chunks sequentially or in parallel
+for (const chunk of chunks) {
+  await processWithClaude(chunk);
+}
+```
+
+#### Common Pitfalls
+
+- **Query Too Vague**: "fix bug" → scores poorly, use "fix JWT refresh token bug"
+- **Threshold Too High**: Missing important files, reduce to 0.6-0.7
+- **Ignoring Dependencies**: Set `maxDepth: 0` → missing crucial context
+- **Cache Disabled**: Repeated analysis is expensive, always enable caching
+
 ## Integration Examples
 
 ### With Prompt Toolkit
